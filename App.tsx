@@ -37,7 +37,7 @@ const gun = GunLib ? new GunLib({
     'https://relay.peer.ooo/gun',
     'https://gun-us.herokuapp.com/gun'
   ],
-  localStorage: false // Критично: отключаем локальный кеш для чистого Real-time
+  localStorage: true // Возвращаем true для надежности событий
 }) : null;
 
 const App: React.FC = () => {
@@ -74,30 +74,67 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!gun) return;
     const room = gun.get(ROOT_KEY);
+    console.log('[Gun] Initializing room:', ROOT_KEY);
     setIsOnline(true);
 
     // 1. Слушаем статус раскрытия карт
     room.get('revealed_state').on((data: any) => {
-      if (data && data.val !== undefined) {
-        setRevealed(!!data.val);
+      console.log('[Gun] revealed_state changed:', data);
+      // Gun.js может возвращать данные в разных форматах
+      const value = data?.val !== undefined ? data.val : (data !== null && data !== undefined ? data : false);
+      setRevealed(!!value);
+    });
+
+    // Загружаем начальное состояние раскрытия
+    room.get('revealed_state').once((data: any) => {
+      if (data) {
+        const value = data?.val !== undefined ? data.val : (data !== null && data !== undefined ? data : false);
+        setRevealed(!!value);
       }
     });
 
     // 2. Слушаем текущую задачу
     room.get('task_state').on((data: any) => {
-      if (data && data.payload) {
-        try {
-          const task = JSON.parse(data.payload);
-          setCurrentTask(task);
-        } catch (e) { console.error(e); }
+      console.log('[Gun] task_state changed:', data);
+      if (data) {
+        const payload = data.payload || data;
+        if (typeof payload === 'string') {
+          try {
+            const task = JSON.parse(payload);
+            setCurrentTask(task);
+          } catch (e) { 
+            console.error('[Gun] Error parsing task:', e); 
+          }
+        } else if (payload && payload.title) {
+          setCurrentTask(payload);
+        }
+      }
+    });
+
+    // Загружаем начальное состояние задачи
+    room.get('task_state').once((data: any) => {
+      if (data) {
+        const payload = data.payload || data;
+        if (typeof payload === 'string') {
+          try {
+            const task = JSON.parse(payload);
+            setCurrentTask(task);
+          } catch (e) { 
+            console.error('[Gun] Error parsing initial task:', e); 
+          }
+        } else if (payload && payload.title) {
+          setCurrentTask(payload);
+        }
       }
     });
 
     // 3. Синхронизация участников (карта id -> данные)
     room.get('participants').map().on((data: any, id: string) => {
+      console.log('[Gun] participant changed:', id, data);
       if (!id || id === 'undefined') return;
 
-      if (!data || (data.lastSeen && Date.now() - data.lastSeen > 30000)) {
+      // Gun.js может возвращать null или undefined для удаленных записей
+      if (!data || data === null || (data.lastSeen && Date.now() - data.lastSeen > 30000)) {
         setParticipants(prev => {
           const next = { ...prev };
           delete next[id];
@@ -110,7 +147,7 @@ const App: React.FC = () => {
             id: data.id || id,
             name: data.name || 'Anonymous',
             role: data.role || 'voter',
-            currentVote: data.currentVote === null ? null : String(data.currentVote)
+            currentVote: data.currentVote === null || data.currentVote === undefined ? null : String(data.currentVote)
           }
         }));
       }
@@ -140,6 +177,16 @@ const App: React.FC = () => {
       const user = JSON.parse(saved);
       setCurrentUser(user);
       setView(AppView.SESSION);
+      
+      // Регистрируем пользователя в Gun.js при восстановлении из localStorage
+      if (gun && user) {
+        const room = gun.get(ROOT_KEY);
+        room.get('participants').get(user.id).put({
+          ...user,
+          lastSeen: Date.now()
+        });
+        console.log('[Gun] User restored and registered:', user.id);
+      }
     }
   }, []);
 
@@ -152,6 +199,16 @@ const App: React.FC = () => {
     };
     setCurrentUser(newUser);
     setView(AppView.SESSION);
+    
+    // Регистрируем пользователя в Gun.js для синхронизации с другими участниками
+    if (gun) {
+      const room = gun.get(ROOT_KEY);
+      room.get('participants').get(newUser.id).put({
+        ...newUser,
+        lastSeen: Date.now()
+      });
+      console.log('[Gun] User registered:', newUser.id);
+    }
   };
 
   const onLogout = () => {
@@ -176,7 +233,12 @@ const App: React.FC = () => {
 
   const onReveal = () => {
     if (gun) {
-      gun.get(ROOT_KEY).get('revealed_state').put({ val: true, ts: Date.now() });
+      console.log('[Gun] Triggering reveal now');
+      const room = gun.get(ROOT_KEY);
+      // Используем простое значение для лучшей совместимости
+      room.get('revealed_state').put(true);
+      // Также обновляем локально для мгновенной реакции
+      setRevealed(true);
     }
   };
 
@@ -189,7 +251,10 @@ const App: React.FC = () => {
       room.get('participants').get(id).get('currentVote').put(null);
     });
 
-    room.get('revealed_state').put({ val: false, ts: Date.now() });
+    room.get('revealed_state').put(false);
+    console.log('[Gun] Triggered reset: revealed=false');
+    // Также обновляем локально для мгновенной реакции
+    setRevealed(false);
     setAiInsight(null);
     if (currentUser) {
       setCurrentUser(prev => prev ? ({ ...prev, currentVote: null }) : null);
