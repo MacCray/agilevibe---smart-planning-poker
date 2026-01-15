@@ -19,9 +19,6 @@ import {
   Edit3,
   UserCheck,
   ShieldCheck,
-  Plus,
-  Trash2,
-  Settings2,
   LogOut,
   BrainCircuit,
   Loader2,
@@ -29,20 +26,23 @@ import {
   WifiOff
 } from 'lucide-react';
 
-// Access Gun from window (loaded via CDN in index.html)
-const Gun = (window as any).Gun;
-// Используем несколько надежных реле для стабильности в РФ и Европе
-const gun = Gun([
-  'https://gun-manhattan.herokuapp.com/gun',
-  'https://relay.peer.ooo/gun',
-  'https://gun-us.herokuapp.com/gun'
-]);
-
 // Глобальный ключ для всех пользователей приложения
-const GLOBAL_SESSION_KEY = 'agilevibe_global_v2';
+const GLOBAL_SESSION_KEY = 'agilevibe_global_v4';
 
 const App: React.FC = () => {
-  const roomData = useMemo(() => gun.get(GLOBAL_SESSION_KEY), []);
+  // Безопасная инициализация Gun
+  const gun = useMemo(() => {
+    const GunLib = (window as any).Gun;
+    if (!GunLib) return null;
+    return new GunLib([
+      'https://gun-manhattan.herokuapp.com/gun',
+      'https://relay.peer.ooo/gun',
+      'https://gun-us.herokuapp.com/gun',
+      'https://gun-eu.herokuapp.com/gun'
+    ]);
+  }, []);
+
+  const roomData = useMemo(() => gun ? gun.get(GLOBAL_SESSION_KEY) : null, [gun]);
 
   const [view, setView] = useState<AppView>(AppView.LANDING);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -60,8 +60,6 @@ const App: React.FC = () => {
     deck: DEFAULT_DECK
   });
 
-  const [newCardValue, setNewCardValue] = useState('');
-
   const sessionRef = useRef(session);
   const currentUserRef = useRef(currentUser);
 
@@ -69,9 +67,9 @@ const App: React.FC = () => {
 
   useEffect(() => {
     currentUserRef.current = currentUser;
-    if (currentUser) {
+    if (currentUser && roomData) {
       localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-      // Регистрируем свое присутствие в Gun
+      // Регистрируем свое присутствие
       roomData.get('participants').get(currentUser.id).put({
         id: currentUser.id,
         name: currentUser.name,
@@ -83,32 +81,37 @@ const App: React.FC = () => {
   }, [currentUser, roomData]);
 
   useEffect(() => {
-    // Проверка статуса подключения
-    const checkConnection = setInterval(() => {
-      // В Gun.js нет прямого метода "isOnline", но мы можем судить по наличию peers
-      setIsOnline(true);
-    }, 5000);
+    if (!roomData) return;
 
-    // 1. Синхронизация состояния задачи и раскрытия карт
-    roomData.get('state').on((data: any) => {
-      if (!data) return;
-      setSession(prev => ({
-        ...prev,
-        currentTask: data.currentTask ? JSON.parse(data.currentTask) : prev.currentTask,
-        revealed: !!data.revealed,
-        deck: data.deck ? JSON.parse(data.deck) : prev.deck
-      }));
+    setIsOnline(true);
+
+    // 1. Синхронизация статуса раскрытия (REVEALED)
+    // Используем плоский путь для максимальной надежности
+    roomData.get('revealed').on((val: any) => {
+      setSession(prev => ({ ...prev, revealed: !!val }));
     });
 
-    // 2. Синхронизация всех участников
+    // 2. Синхронизация текущей задачи
+    roomData.get('currentTask').on((val: any) => {
+      if (val) {
+        try {
+          const task = typeof val === 'string' ? JSON.parse(val) : val;
+          setSession(prev => ({ ...prev, currentTask: task }));
+        } catch (e) {
+          console.error("Task sync error", e);
+        }
+      }
+    });
+
+    // 3. Синхронизация участников
     roomData.get('participants').map().on((user: any, id: string) => {
       if (!id || id === 'undefined' || id === 'null') return;
 
       setSession(prev => {
         const others = prev.participants.filter(p => p.id !== id);
 
-        // Удаляем неактивных участников (кто не подавал признаков жизни > 30 сек)
-        if (!user || (user.lastSeen && Date.now() - user.lastSeen > 30000)) {
+        // Удаляем неактивных (кто не обновлял lastSeen > 40 сек)
+        if (!user || (user.lastSeen && Date.now() - user.lastSeen > 40000)) {
            return { ...prev, participants: others };
         }
 
@@ -123,30 +126,18 @@ const App: React.FC = () => {
       });
     });
 
-    // Обновляем "lastSeen" каждые 10 секунд
     const heartbeat = setInterval(() => {
-      if (currentUserRef.current) {
+      if (currentUserRef.current && roomData) {
         roomData.get('participants').get(currentUserRef.current.id).get('lastSeen').put(Date.now());
       }
-    }, 10000);
+    }, 15000);
 
     return () => {
-      roomData.get('state').off();
+      roomData.get('revealed').off();
+      roomData.get('currentTask').off();
       roomData.get('participants').off();
       clearInterval(heartbeat);
-      clearInterval(checkConnection);
     };
-  }, [roomData]);
-
-  // Очистка при закрытии вкладки
-  useEffect(() => {
-    const handleUnload = () => {
-      if (currentUserRef.current) {
-        roomData.get('participants').get(currentUserRef.current.id).put(null);
-      }
-    };
-    window.addEventListener('beforeunload', handleUnload);
-    return () => window.removeEventListener('beforeunload', handleUnload);
   }, [roomData]);
 
   useEffect(() => {
@@ -169,7 +160,7 @@ const App: React.FC = () => {
   };
 
   const onLogout = () => {
-    if (currentUser) {
+    if (currentUser && roomData) {
       roomData.get('participants').get(currentUser.id).put(null);
     }
     localStorage.removeItem(STORAGE_KEYS.USER);
@@ -178,22 +169,28 @@ const App: React.FC = () => {
   };
 
   const onVote = (vote: string) => {
-    if (!currentUser || currentUser.role === 'observer' || session.revealed) return;
+    if (!currentUser || currentUser.role === 'observer' || session.revealed || !roomData) return;
     const voteValue = currentUser.currentVote === vote ? null : vote;
     setCurrentUser(prev => prev ? ({ ...prev, currentVote: voteValue }) : null);
     roomData.get('participants').get(currentUser.id).get('currentVote').put(voteValue);
   };
 
   const onReveal = () => {
-    roomData.get('state').get('revealed').put(true);
+    if (roomData) {
+      // Пушим напрямую в плоский узел
+      roomData.get('revealed').put(true);
+    }
   };
 
   const onReset = () => {
-    // Сбрасываем голоса всем в Gun
+    if (!roomData) return;
+
+    // Сбрасываем голоса всем
     sessionRef.current.participants.forEach(p => {
       roomData.get('participants').get(p.id).get('currentVote').put(null);
     });
-    roomData.get('state').get('revealed').put(false);
+
+    roomData.get('revealed').put(false);
     setAiInsight(null);
     if (currentUser) {
       setCurrentUser({ ...currentUser, currentVote: null });
@@ -202,14 +199,14 @@ const App: React.FC = () => {
 
   const onUpdateTask = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (!roomData) return;
     const formData = new FormData(e.currentTarget);
     const title = (formData.get('title') as string) || 'New Task';
     const description = (formData.get('description') as string) || '';
-
     const newTask: Task = { id: Date.now().toString(), title, description };
 
-    onReset(); // Сброс при смене задачи
-    roomData.get('state').get('currentTask').put(JSON.stringify(newTask));
+    onReset();
+    roomData.get('currentTask').put(JSON.stringify(newTask));
     e.currentTarget.reset();
   };
 
@@ -247,7 +244,7 @@ const App: React.FC = () => {
               <Trophy size={32} />
             </div>
             <h1 className="text-3xl font-bold text-slate-900 tracking-tight">AgileVibe</h1>
-            <p className="mt-2 text-slate-500">Real-time Planning Poker for Teams</p>
+            <p className="mt-2 text-slate-500">Global Planning Poker Session</p>
           </div>
 
           <div className="mt-8 space-y-6">
@@ -260,9 +257,12 @@ const App: React.FC = () => {
             <form onSubmit={(e) => { e.preventDefault(); onJoin(new FormData(e.currentTarget).get('name') as string); }} className="space-y-6">
               <input name="name" type="text" required maxLength={15} className="block w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-900 focus:ring-2 focus:ring-indigo-500 outline-none transition-all" placeholder="Enter your name" />
               <button type="submit" className="w-full py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-700 transition-all shadow-lg transform hover:scale-[1.02]">
-                Join Team
+                Join Global Session
               </button>
             </form>
+          </div>
+          <div className="text-center text-[10px] text-slate-400 font-medium">
+            Shared workspace. All colleagues on this site are in the same room.
           </div>
         </div>
       </div>
@@ -278,7 +278,7 @@ const App: React.FC = () => {
             <span className="text-xl font-bold text-slate-900 hidden sm:block">AgileVibe</span>
             <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase ${isOnline ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
               {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
-              {isOnline ? 'Live' : 'Offline'}
+              {isOnline ? 'Live' : 'Connecting...'}
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -294,31 +294,29 @@ const App: React.FC = () => {
       <main className="max-w-7xl mx-auto py-8 px-4 lg:px-8">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           <div className="lg:col-span-8 space-y-8">
-            {/* Task Info */}
             <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-6">
               <div className="mb-4">
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 uppercase mb-2 inline-block">Current Goal</span>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-100 text-indigo-800 uppercase mb-2 inline-block">Story details</span>
                 <h2 className="text-2xl font-bold text-slate-900">{session.currentTask?.title}</h2>
               </div>
-              <p className="text-slate-600 leading-relaxed mb-6 whitespace-pre-wrap">{session.currentTask?.description || 'No description available for this task.'}</p>
+              <p className="text-slate-600 leading-relaxed mb-6 whitespace-pre-wrap">{session.currentTask?.description || 'No description available.'}</p>
 
               {currentUser?.role === 'admin' && (
                 <div className="border-t pt-6 mt-6">
-                  <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 mb-4"><Edit3 size={16} className="text-indigo-500"/> Update Task</h3>
+                  <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2 mb-4"><Edit3 size={16} className="text-indigo-500"/> Edit Task</h3>
                   <form onSubmit={onUpdateTask} className="grid gap-4">
-                    <input name="title" required placeholder="Story Title (e.g. AUTH-123)" className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all" />
-                    <textarea name="description" placeholder="Optional details..." className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all h-20" />
-                    <button type="submit" className="bg-indigo-600 text-white py-2 px-6 rounded-xl font-bold hover:bg-indigo-700 transition-all w-fit shadow-md">Update for Everyone</button>
+                    <input name="title" required placeholder="Task Title" className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all" />
+                    <textarea name="description" placeholder="Requirements/Details..." className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all h-20" />
+                    <button type="submit" className="bg-indigo-600 text-white py-2 px-6 rounded-xl font-bold hover:bg-indigo-700 transition-all w-fit shadow-md">New Round & Update</button>
                   </form>
                 </div>
               )}
             </div>
 
-            {/* Voting Cards */}
             <div className="space-y-4">
               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <Users size={20} className="text-indigo-500"/>
-                {currentUser?.role === 'observer' ? 'Viewing Estimates' : 'Your Estimate'}
+                {currentUser?.role === 'observer' ? 'Progress' : 'Pick a card'}
               </h3>
               <div className="flex flex-wrap gap-4">
                 {session.deck.map(val => (
@@ -333,13 +331,12 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            {/* Results Section */}
             {session.revealed && (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
                 <div className="bg-white rounded-2xl shadow-lg border-l-4 border-indigo-500 p-8">
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
                     <div className="text-center border-r border-slate-100">
-                      <p className="text-xs text-slate-400 font-bold uppercase mb-1">Average Score</p>
+                      <p className="text-xs text-slate-400 font-bold uppercase mb-1">Average</p>
                       <p className="text-6xl font-black text-indigo-600">{average}</p>
                     </div>
                     <div className="md:col-span-2">
@@ -348,13 +345,12 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                {/* AI Insights */}
                 <div className="bg-indigo-50 rounded-2xl p-6 border border-indigo-100 relative overflow-hidden">
                   <div className="relative z-10">
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-2 text-indigo-900 font-bold">
                         <BrainCircuit size={20} />
-                        AI Agile Coach Insight
+                        Gemini AI Insight
                       </div>
                       <button
                         onClick={handleAiAnalysis}
@@ -362,25 +358,23 @@ const App: React.FC = () => {
                         className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg text-xs font-bold text-indigo-600 shadow-sm hover:shadow-md transition-all disabled:opacity-50"
                       >
                         {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCcw size={14} />}
-                        {aiInsight ? 'Re-analyze' : 'Analyze Results'}
+                        Analyze Results
                       </button>
                     </div>
                     {aiInsight ? (
                       <p className="text-indigo-800 text-sm leading-relaxed italic">"{aiInsight}"</p>
                     ) : (
-                      <p className="text-indigo-400 text-sm italic">Click analyze to get an AI summary of these estimations.</p>
+                      <p className="text-indigo-400 text-sm italic">Get an AI coaching summary for these votes.</p>
                     )}
                   </div>
-                  <BrainCircuit className="absolute -bottom-8 -right-8 text-indigo-200/30 w-32 h-32" />
                 </div>
               </div>
             )}
           </div>
 
-          {/* Right Sidebar */}
           <div className="lg:col-span-4 space-y-6">
             <div className="bg-slate-900 rounded-2xl p-6 text-white shadow-xl">
-              <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-6">Control Panel</h3>
+              <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-6">Management</h3>
               <div className="space-y-3">
                 <button
                   onClick={onReveal}
@@ -391,9 +385,9 @@ const App: React.FC = () => {
                 </button>
                 <button
                   onClick={onReset}
-                  className="w-full flex items-center justify-center gap-3 py-4 bg-slate-800 text-slate-300 rounded-xl font-bold hover:bg-slate-700 hover:text-white transition-all border border-slate-700"
+                  className="w-full flex items-center justify-center gap-3 py-4 bg-slate-800 text-slate-300 rounded-xl font-bold hover:bg-slate-700 transition-all border border-slate-700"
                 >
-                  <RefreshCcw size={20}/> Reset Current Round
+                  <RefreshCcw size={20}/> Clear All Votes
                 </button>
               </div>
             </div>
@@ -403,10 +397,6 @@ const App: React.FC = () => {
               revealed={session.revealed}
               currentUserId={currentUser?.id || ''}
             />
-
-            <div className="p-4 bg-amber-50 rounded-xl border border-amber-100 text-[11px] text-amber-800 leading-tight">
-              <strong>Tip:</strong> Everyone on this URL is in the same session. Clear the browser cache if you want to change your name.
-            </div>
           </div>
         </div>
       </main>
