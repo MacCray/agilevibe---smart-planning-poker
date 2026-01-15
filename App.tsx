@@ -12,6 +12,19 @@ import ParticipantList from './components/ParticipantList';
 import EstimationChart from './components/EstimationChart';
 import { getEstimationInsight } from './services/geminiService';
 import {
+  initFirebase,
+  subscribeToRoomState,
+  subscribeToParticipants,
+  updateRevealedState,
+  updateTask,
+  upsertParticipant,
+  removeParticipant,
+  updateParticipantVote,
+  resetAllVotes,
+  updateParticipantHeartbeat,
+  type ParticipantData
+} from './services/firebaseService';
+import {
   Users,
   RefreshCcw,
   Eye,
@@ -25,20 +38,6 @@ import {
   Wifi,
   WifiOff
 } from 'lucide-react';
-
-// Уникальный ключ для этой версии синхронизации
-const ROOT_KEY = 'agilevibe_v6_final';
-
-// Инициализируем Gun вне компонента для стабильности соединения
-const GunLib = (window as any).Gun;
-const gun = GunLib ? new GunLib({
-  peers: [
-    'https://gun-manhattan.herokuapp.com/gun',
-    'https://relay.peer.ooo/gun',
-    'https://gun-us.herokuapp.com/gun'
-  ],
-  localStorage: true // Возвращаем true для надежности событий
-}) : null;
 
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>(AppView.LANDING);
@@ -72,102 +71,61 @@ const App: React.FC = () => {
   }, [participants]);
 
   useEffect(() => {
-    if (!gun) return;
-    const room = gun.get(ROOT_KEY);
-    console.log('[Gun] Initializing room:', ROOT_KEY);
+    // Инициализируем Firebase
+    const firestore = initFirebase();
+    if (!firestore) {
+      console.warn('[Firebase] Not initialized. Real-time sync disabled.');
+      setIsOnline(false);
+      return;
+    }
+
     setIsOnline(true);
+    console.log('[Firebase] Initialized successfully');
 
-    // 1. Слушаем статус раскрытия карт
-    room.get('revealed_state').on((data: any) => {
-      console.log('[Gun] revealed_state changed:', data);
-      // Gun.js может возвращать данные в разных форматах
-      const value = data?.val !== undefined ? data.val : (data !== null && data !== undefined ? data : false);
-      setRevealed(!!value);
-    });
-
-    // Загружаем начальное состояние раскрытия
-    room.get('revealed_state').once((data: any) => {
-      if (data) {
-        const value = data?.val !== undefined ? data.val : (data !== null && data !== undefined ? data : false);
-        setRevealed(!!value);
+    // 1. Подписка на состояние комнаты (раскрытие карт и задача)
+    const unsubscribeRoom = subscribeToRoomState(
+      (state) => {
+        setRevealed(state.revealed);
+        setCurrentTask(state.currentTask);
+      },
+      (error) => {
+        console.error('[Firebase] Room state error:', error);
+        setIsOnline(false);
       }
-    });
+    );
 
-    // 2. Слушаем текущую задачу
-    room.get('task_state').on((data: any) => {
-      console.log('[Gun] task_state changed:', data);
-      if (data) {
-        const payload = data.payload || data;
-        if (typeof payload === 'string') {
-          try {
-            const task = JSON.parse(payload);
-            setCurrentTask(task);
-          } catch (e) { 
-            console.error('[Gun] Error parsing task:', e); 
-          }
-        } else if (payload && payload.title) {
-          setCurrentTask(payload);
-        }
-      }
-    });
-
-    // Загружаем начальное состояние задачи
-    room.get('task_state').once((data: any) => {
-      if (data) {
-        const payload = data.payload || data;
-        if (typeof payload === 'string') {
-          try {
-            const task = JSON.parse(payload);
-            setCurrentTask(task);
-          } catch (e) { 
-            console.error('[Gun] Error parsing initial task:', e); 
-          }
-        } else if (payload && payload.title) {
-          setCurrentTask(payload);
-        }
-      }
-    });
-
-    // 3. Синхронизация участников (карта id -> данные)
-    room.get('participants').map().on((data: any, id: string) => {
-      console.log('[Gun] participant changed:', id, data);
-      if (!id || id === 'undefined') return;
-
-      // Gun.js может возвращать null или undefined для удаленных записей
-      if (!data || data === null || (data.lastSeen && Date.now() - data.lastSeen > 30000)) {
-        setParticipants(prev => {
-          const next = { ...prev };
-          delete next[id];
-          return next;
+    // 2. Подписка на участников
+    const unsubscribeParticipants = subscribeToParticipants(
+      (participantsData) => {
+        // Конвертируем ParticipantData в User формат
+        const users: Record<string, User> = {};
+        Object.entries(participantsData).forEach(([id, data]) => {
+          users[id] = {
+            id: data.id,
+            name: data.name,
+            role: data.role,
+            currentVote: data.currentVote
+          };
         });
-      } else {
-        setParticipants(prev => ({
-          ...prev,
-          [id]: {
-            id: data.id || id,
-            name: data.name || 'Anonymous',
-            role: data.role || 'voter',
-            currentVote: data.currentVote === null || data.currentVote === undefined ? null : String(data.currentVote)
-          }
-        }));
+        setParticipants(users);
+      },
+      (error) => {
+        console.error('[Firebase] Participants error:', error);
+        setIsOnline(false);
       }
-    });
+    );
 
-    // Обновляем свое присутствие в сети
+    // Heartbeat для поддержания активности участника
     const heartbeat = setInterval(() => {
       if (currentUserRef.current) {
-        room.get('participants').get(currentUserRef.current.id).put({
-          ...currentUserRef.current,
-          lastSeen: Date.now()
-        });
+        updateParticipantHeartbeat(currentUserRef.current.id).catch(console.error);
       }
     }, 5000);
 
     return () => {
+      if (unsubscribeRoom) unsubscribeRoom();
+      if (unsubscribeParticipants) unsubscribeParticipants();
       clearInterval(heartbeat);
-      room.get('revealed_state').off();
-      room.get('task_state').off();
-      room.get('participants').off();
     };
   }, []);
 
@@ -178,14 +136,16 @@ const App: React.FC = () => {
       setCurrentUser(user);
       setView(AppView.SESSION);
       
-      // Регистрируем пользователя в Gun.js при восстановлении из localStorage
-      if (gun && user) {
-        const room = gun.get(ROOT_KEY);
-        room.get('participants').get(user.id).put({
-          ...user,
-          lastSeen: Date.now()
-        });
-        console.log('[Gun] User restored and registered:', user.id);
+      // Регистрируем пользователя в Firebase при восстановлении из localStorage
+      if (user) {
+        upsertParticipant({
+          id: user.id,
+          name: user.name,
+          role: user.role,
+          currentVote: user.currentVote
+        }).then(() => {
+          console.log('[Firebase] User restored and registered:', user.id);
+        }).catch(console.error);
       }
     }
   }, []);
@@ -200,20 +160,20 @@ const App: React.FC = () => {
     setCurrentUser(newUser);
     setView(AppView.SESSION);
     
-    // Регистрируем пользователя в Gun.js для синхронизации с другими участниками
-    if (gun) {
-      const room = gun.get(ROOT_KEY);
-      room.get('participants').get(newUser.id).put({
-        ...newUser,
-        lastSeen: Date.now()
-      });
-      console.log('[Gun] User registered:', newUser.id);
-    }
+    // Регистрируем пользователя в Firebase для синхронизации с другими участниками
+    upsertParticipant({
+      id: newUser.id,
+      name: newUser.name,
+      role: newUser.role,
+      currentVote: newUser.currentVote
+    }).then(() => {
+      console.log('[Firebase] User registered:', newUser.id);
+    }).catch(console.error);
   };
 
   const onLogout = () => {
-    if (currentUser && gun) {
-      gun.get(ROOT_KEY).get('participants').get(currentUser.id).put(null);
+    if (currentUser) {
+      removeParticipant(currentUser.id).catch(console.error);
     }
     localStorage.removeItem(STORAGE_KEYS.USER);
     setCurrentUser(null);
@@ -221,56 +181,52 @@ const App: React.FC = () => {
   };
 
   const onVote = (vote: string) => {
-    if (!currentUser || currentUser.role === 'observer' || revealed || !gun) return;
+    if (!currentUser || currentUser.role === 'observer' || revealed) return;
     const voteValue = currentUser.currentVote === vote ? null : vote;
     const updatedUser = { ...currentUser, currentVote: voteValue };
     setCurrentUser(updatedUser);
-    gun.get(ROOT_KEY).get('participants').get(currentUser.id).put({
-      ...updatedUser,
-      lastSeen: Date.now()
-    });
+    
+    // Обновляем голос в Firebase
+    updateParticipantVote(currentUser.id, voteValue).catch(console.error);
   };
 
   const onReveal = () => {
-    if (gun) {
-      console.log('[Gun] Triggering reveal now');
-      const room = gun.get(ROOT_KEY);
-      // Используем простое значение для лучшей совместимости
-      room.get('revealed_state').put(true);
-      // Также обновляем локально для мгновенной реакции
-      setRevealed(true);
-    }
+    console.log('[Firebase] Triggering reveal now');
+    // Обновляем локально для мгновенной реакции
+    setRevealed(true);
+    // Синхронизируем с Firebase
+    updateRevealedState(true).catch(console.error);
   };
 
   const onReset = () => {
-    if (!gun) return;
-    const room = gun.get(ROOT_KEY);
-
-    // Сбрасываем голоса всем активным участникам в БД
-    Object.keys(participantsRef.current).forEach(id => {
-      room.get('participants').get(id).get('currentVote').put(null);
-    });
-
-    room.get('revealed_state').put(false);
-    console.log('[Gun] Triggered reset: revealed=false');
-    // Также обновляем локально для мгновенной реакции
+    // Обновляем локально для мгновенной реакции
     setRevealed(false);
     setAiInsight(null);
     if (currentUser) {
       setCurrentUser(prev => prev ? ({ ...prev, currentVote: null }) : null);
     }
+
+    // Сбрасываем голоса всем активным участникам в Firebase
+    const participantIds = Object.keys(participantsRef.current);
+    if (participantIds.length > 0) {
+      resetAllVotes(participantIds).catch(console.error);
+    }
+
+    // Сбрасываем состояние раскрытия
+    updateRevealedState(false).catch(console.error);
+    console.log('[Firebase] Triggered reset: revealed=false');
   };
 
   const onUpdateTask = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    if (!gun) return;
     const formData = new FormData(e.currentTarget);
     const title = (formData.get('title') as string) || 'New Task';
     const description = (formData.get('description') as string) || '';
     const newTask: Task = { id: Date.now().toString(), title, description };
 
     onReset();
-    gun.get(ROOT_KEY).get('task_state').put({ payload: JSON.stringify(newTask), ts: Date.now() });
+    // Обновляем задачу в Firebase
+    updateTask(newTask).catch(console.error);
     e.currentTarget.reset();
   };
 
