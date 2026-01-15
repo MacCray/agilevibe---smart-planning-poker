@@ -26,20 +26,24 @@ import {
   WifiOff
 } from 'lucide-react';
 
-// Глобальный ключ для всех пользователей приложения
-const GLOBAL_SESSION_KEY = 'agilevibe_global_v4';
+// Обновленный ключ для чистой сессии
+const GLOBAL_SESSION_KEY = 'agilevibe_v5_prod';
 
 const App: React.FC = () => {
-  // Безопасная инициализация Gun
+  // Инициализация Gun с расширенным списком реле
   const gun = useMemo(() => {
     const GunLib = (window as any).Gun;
     if (!GunLib) return null;
-    return new GunLib([
-      'https://gun-manhattan.herokuapp.com/gun',
-      'https://relay.peer.ooo/gun',
-      'https://gun-us.herokuapp.com/gun',
-      'https://gun-eu.herokuapp.com/gun'
-    ]);
+    return new GunLib({
+      peers: [
+        'https://gun-manhattan.herokuapp.com/gun',
+        'https://relay.peer.ooo/gun',
+        'https://gun-us.herokuapp.com/gun',
+        'https://gun-eu.herokuapp.com/gun',
+        'https://peer.wall.org/gun'
+      ],
+      localStorage: true
+    });
   }, []);
 
   const roomData = useMemo(() => gun ? gun.get(GLOBAL_SESSION_KEY) : null, [gun]);
@@ -65,11 +69,11 @@ const App: React.FC = () => {
 
   useEffect(() => { sessionRef.current = session; }, [session]);
 
+  // Регистрация и обновление своего присутствия
   useEffect(() => {
     currentUserRef.current = currentUser;
     if (currentUser && roomData) {
       localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-      // Регистрируем свое присутствие
       roomData.get('participants').get(currentUser.id).put({
         id: currentUser.id,
         name: currentUser.name,
@@ -85,17 +89,18 @@ const App: React.FC = () => {
 
     setIsOnline(true);
 
-    // 1. Синхронизация статуса раскрытия (REVEALED)
-    // Используем плоский путь для максимальной надежности
-    roomData.get('revealed').on((val: any) => {
-      setSession(prev => ({ ...prev, revealed: !!val }));
+    // Слушаем статус раскрытия через объект с меткой времени (для 100% срабатывания)
+    roomData.get('revealed_state').on((data: any) => {
+      if (data && data.val !== undefined) {
+        setSession(prev => ({ ...prev, revealed: !!data.val }));
+      }
     });
 
-    // 2. Синхронизация текущей задачи
-    roomData.get('currentTask').on((val: any) => {
-      if (val) {
+    // Слушаем текущую задачу
+    roomData.get('task_state').on((data: any) => {
+      if (data && data.payload) {
         try {
-          const task = typeof val === 'string' ? JSON.parse(val) : val;
+          const task = JSON.parse(data.payload);
           setSession(prev => ({ ...prev, currentTask: task }));
         } catch (e) {
           console.error("Task sync error", e);
@@ -103,14 +108,14 @@ const App: React.FC = () => {
       }
     });
 
-    // 3. Синхронизация участников
+    // Синхронизация участников
     roomData.get('participants').map().on((user: any, id: string) => {
       if (!id || id === 'undefined' || id === 'null') return;
 
       setSession(prev => {
         const others = prev.participants.filter(p => p.id !== id);
 
-        // Удаляем неактивных (кто не обновлял lastSeen > 40 сек)
+        // Удаляем тех, кто пропал из сети (40 сек)
         if (!user || (user.lastSeen && Date.now() - user.lastSeen > 40000)) {
            return { ...prev, participants: others };
         }
@@ -126,15 +131,16 @@ const App: React.FC = () => {
       });
     });
 
+    // Heartbeat для отображения присутствия
     const heartbeat = setInterval(() => {
       if (currentUserRef.current && roomData) {
         roomData.get('participants').get(currentUserRef.current.id).get('lastSeen').put(Date.now());
       }
-    }, 15000);
+    }, 10000);
 
     return () => {
-      roomData.get('revealed').off();
-      roomData.get('currentTask').off();
+      roomData.get('revealed_state').off();
+      roomData.get('task_state').off();
       roomData.get('participants').off();
       clearInterval(heartbeat);
     };
@@ -177,21 +183,23 @@ const App: React.FC = () => {
 
   const onReveal = () => {
     if (roomData) {
-      // Пушим напрямую в плоский узел
-      roomData.get('revealed').put(true);
+      // Отправляем объект с TS, чтобы спровоцировать событие .on() у всех участников
+      roomData.get('revealed_state').put({ val: true, ts: Date.now() });
     }
   };
 
   const onReset = () => {
     if (!roomData) return;
 
-    // Сбрасываем голоса всем
+    // Сброс голосов в БД
     sessionRef.current.participants.forEach(p => {
       roomData.get('participants').get(p.id).get('currentVote').put(null);
     });
 
-    roomData.get('revealed').put(false);
+    // Сброс состояния раскрытия
+    roomData.get('revealed_state').put({ val: false, ts: Date.now() });
     setAiInsight(null);
+
     if (currentUser) {
       setCurrentUser({ ...currentUser, currentVote: null });
     }
@@ -206,7 +214,7 @@ const App: React.FC = () => {
     const newTask: Task = { id: Date.now().toString(), title, description };
 
     onReset();
-    roomData.get('currentTask').put(JSON.stringify(newTask));
+    roomData.get('task_state').put({ payload: JSON.stringify(newTask), ts: Date.now() });
     e.currentTarget.reset();
   };
 
@@ -261,8 +269,8 @@ const App: React.FC = () => {
               </button>
             </form>
           </div>
-          <div className="text-center text-[10px] text-slate-400 font-medium">
-            Shared workspace. All colleagues on this site are in the same room.
+          <div className="text-center text-[10px] text-slate-400 font-medium px-4">
+            No rooms needed. Open this URL on multiple devices to sync instantly.
           </div>
         </div>
       </div>
@@ -276,9 +284,9 @@ const App: React.FC = () => {
           <div className="flex items-center gap-4">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold">A</div>
             <span className="text-xl font-bold text-slate-900 hidden sm:block">AgileVibe</span>
-            <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase ${isOnline ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-              {isOnline ? <Wifi size={10}/> : <WifiOff size={10}/>}
-              {isOnline ? 'Live' : 'Connecting...'}
+            <div className={`flex items-center gap-1.5 px-2 py-1 rounded-full text-[10px] font-bold uppercase ${isOnline ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+              {isOnline ? <Wifi size={10}/> : <Loader2 size={10} className="animate-spin"/>}
+              {isOnline ? 'Live Sync' : 'Connecting...'}
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -307,7 +315,7 @@ const App: React.FC = () => {
                   <form onSubmit={onUpdateTask} className="grid gap-4">
                     <input name="title" required placeholder="Task Title" className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all" />
                     <textarea name="description" placeholder="Requirements/Details..." className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-indigo-500 transition-all h-20" />
-                    <button type="submit" className="bg-indigo-600 text-white py-2 px-6 rounded-xl font-bold hover:bg-indigo-700 transition-all w-fit shadow-md">New Round & Update</button>
+                    <button type="submit" className="bg-indigo-600 text-white py-2 px-6 rounded-xl font-bold hover:bg-indigo-700 transition-all w-fit shadow-md">Start New Round</button>
                   </form>
                 </div>
               )}
@@ -316,7 +324,7 @@ const App: React.FC = () => {
             <div className="space-y-4">
               <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
                 <Users size={20} className="text-indigo-500"/>
-                {currentUser?.role === 'observer' ? 'Progress' : 'Pick a card'}
+                {currentUser?.role === 'observer' ? 'Progress' : 'Pick your card'}
               </h3>
               <div className="flex flex-wrap gap-4">
                 {session.deck.map(val => (
@@ -350,7 +358,7 @@ const App: React.FC = () => {
                     <div className="flex items-center justify-between mb-4">
                       <div className="flex items-center gap-2 text-indigo-900 font-bold">
                         <BrainCircuit size={20} />
-                        Gemini AI Insight
+                        Gemini AI Coaching
                       </div>
                       <button
                         onClick={handleAiAnalysis}
@@ -358,13 +366,13 @@ const App: React.FC = () => {
                         className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-lg text-xs font-bold text-indigo-600 shadow-sm hover:shadow-md transition-all disabled:opacity-50"
                       >
                         {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCcw size={14} />}
-                        Analyze Results
+                        Analyze Votes
                       </button>
                     </div>
                     {aiInsight ? (
                       <p className="text-indigo-800 text-sm leading-relaxed italic">"{aiInsight}"</p>
                     ) : (
-                      <p className="text-indigo-400 text-sm italic">Get an AI coaching summary for these votes.</p>
+                      <p className="text-indigo-400 text-sm italic">Analyze to see AI insights on consensus or variance.</p>
                     )}
                   </div>
                 </div>
@@ -374,20 +382,20 @@ const App: React.FC = () => {
 
           <div className="lg:col-span-4 space-y-6">
             <div className="bg-slate-900 rounded-2xl p-6 text-white shadow-xl">
-              <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-6">Management</h3>
+              <h3 className="text-[10px] font-bold uppercase tracking-[0.2em] text-slate-500 mb-6">Game Control</h3>
               <div className="space-y-3">
                 <button
                   onClick={onReveal}
                   disabled={session.revealed || voteList.length === 0}
                   className="w-full flex items-center justify-center gap-3 py-4 bg-indigo-600 text-white rounded-xl font-bold hover:bg-indigo-500 disabled:opacity-50 disabled:bg-slate-800 transition-all shadow-lg"
                 >
-                  <Eye size={20}/> Reveal All Votes
+                  <Eye size={20}/> Reveal Results
                 </button>
                 <button
                   onClick={onReset}
                   className="w-full flex items-center justify-center gap-3 py-4 bg-slate-800 text-slate-300 rounded-xl font-bold hover:bg-slate-700 transition-all border border-slate-700"
                 >
-                  <RefreshCcw size={20}/> Clear All Votes
+                  <RefreshCcw size={20}/> Clear Votes
                 </button>
               </div>
             </div>
