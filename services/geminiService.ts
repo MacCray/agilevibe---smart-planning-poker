@@ -6,15 +6,15 @@ export const getEstimationInsight = async (taskTitle: string, taskDesc: string, 
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     
     const prompt = `
-      As an Agile Coach, analyze the following Planning Poker estimation results:
+      You are an expert Agile Coach. Analyze these Planning Poker results:
       Task: "${taskTitle}"
-      Description: "${taskDesc}"
+      Context: "${taskDesc}"
       Votes Received: ${votes.join(', ')}
 
-      Provide a concise 2-3 sentence analysis. 
-      If there is high variance (e.g., someone voted 3 and someone voted 13), suggest what technical risks or misunderstandings might be causing the gap.
-      If consensus is high, suggest why the task is well-understood.
-      Do not use markdown formatting, just plain text.
+      Analyze the voting distribution.
+      If there is a consensus (similar values), explain why this is a good sign.
+      If there is high variance (e.g. some 3 and some 13), identify potential hidden complexities or missing information that caused the gap.
+      Be concise (max 3 sentences). Output in Russian language.
     `;
 
     const response = await ai.models.generateContent({
@@ -22,9 +22,9 @@ export const getEstimationInsight = async (taskTitle: string, taskDesc: string, 
       contents: prompt,
     });
 
-    return response.text || "No insights available at this time.";
+    return response.text || "Не удалось получить анализ в данный момент.";
   } catch (error) {
     console.error("Gemini Error:", error);
-    return "The AI coach is currently unavailable to analyze these votes.";
+    return "ИИ временно недоступен для анализа оценок.";
   }
 };
