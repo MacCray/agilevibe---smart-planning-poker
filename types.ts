@@ -34,7 +34,8 @@ export type MessageType =
   | 'UPDATE_TASK'
   | 'UPDATE_DECK'
   | 'SYNC'
-  | 'SYNC_REQ';
+  | 'SYNC_REQ'
+  | 'LEAVE';
 
 export interface SyncMessage {
   type: MessageType;
