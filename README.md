@@ -45,4 +45,30 @@ View your app in AI Studio: https://ai.studio/apps/drive/1KSxuEuTuqrS6Yx6s0Q4-RC
 
 This app uses **Firebase Firestore** for real-time synchronization between all participants. All actions (votes, reveals, new participants) are synchronized instantly across all browsers without page refresh.
 
-See [FIREBASE_SETUP.md](FIREBASE_SETUP.md) for complete Firebase setup instructions.
+## Deployment
+
+### Deploy to Firebase Hosting (Recommended)
+
+1. Install Firebase CLI:
+   ```bash
+   npm install -g firebase-tools
+   ```
+
+2. Login to Firebase:
+   ```bash
+   firebase login
+   ```
+
+3. Initialize Firebase Hosting:
+   ```bash
+   firebase init hosting
+   ```
+
+4. Build and deploy:
+   ```bash
+   npm run deploy
+   ```
+
+Your app will be available at `https://your-project-id.web.app`
+
+See [FIREBASE_SETUP.md](FIREBASE_SETUP.md) for complete Firebase setup and deployment instructions.
