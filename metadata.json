@@ -1,0 +1,5 @@
+{
+  "name": "AgileVibe - Smart Planning Poker",
+  "description": "A professional-grade real-time Planning Poker application for agile teams, featuring cross-tab synchronization and AI-powered estimation insights using Gemini.",
+  "requestFramePermissions": []
+}
