@@ -7,7 +7,7 @@ import {
   SyncMessage, 
   MessageType 
 } from './types';
-import { DEFAULT_DECK, BROADCAST_CHANNEL_NAME } from './constants';
+import { DEFAULT_DECK, BROADCAST_CHANNEL_NAME, STORAGE_KEYS } from './constants';
 import PokerCard from './components/PokerCard';
 import ParticipantList from './components/ParticipantList';
 import EstimationChart from './components/EstimationChart';
@@ -25,7 +25,8 @@ import {
   EyeOff,
   Plus,
   Trash2,
-  Settings2
+  Settings2,
+  LogOut
 } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -49,9 +50,27 @@ const App: React.FC = () => {
   const currentUserRef = useRef(currentUser);
   
   useEffect(() => { sessionRef.current = session; }, [session]);
-  useEffect(() => { currentUserRef.current = currentUser; }, [currentUser]);
+    useEffect(() => {
+      currentUserRef.current = currentUser;
+      if (currentUser) {
+        localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
+      }
+    }, [currentUser]);
 
   const channel = useMemo(() => new BroadcastChannel(BROADCAST_CHANNEL_NAME), []);
+
+  // --- Persistence Initialization ---
+  useEffect(() => {
+    const savedUser = localStorage.getItem(STORAGE_KEYS.USER);
+    if (savedUser) {
+      const user = JSON.parse(savedUser) as User;
+      setCurrentUser(user);
+      setView(AppView.SESSION);
+      // Immediately announce presence and request current state
+      channel.postMessage({ type: 'JOIN', payload: user, senderId: user.id });
+      channel.postMessage({ type: 'SYNC_REQ', payload: null, senderId: user.id });
+    }
+  }, [channel]);
 
   const handleMessage = useCallback((msg: SyncMessage) => {
     switch (msg.type) {
@@ -60,7 +79,7 @@ const App: React.FC = () => {
           channel.postMessage({ 
             type: 'SYNC', 
             payload: sessionRef.current, 
-            senderId: 'system' 
+            senderId: currentUserRef.current?.id || 'system'
           });
         }
         break;
@@ -68,7 +87,7 @@ const App: React.FC = () => {
         setSession(prev => {
           const incomingSession = msg.payload as PokerSession;
           const me = currentUserRef.current;
-          if (!me) return prev;
+          if (!me) return incomingSession;
           
           let mergedParticipants = [...incomingSession.participants];
           const existingMeIndex = mergedParticipants.findIndex(p => p.id === me.id);
@@ -126,7 +145,28 @@ const App: React.FC = () => {
       case 'UPDATE_DECK':
         setSession(prev => ({ ...prev, deck: msg.payload }));
         break;
+      case 'LEAVE' as any: // Using any to allow 'LEAVE' type for cleanup
+              setSession(prev => ({
+                ...prev,
+                participants: prev.participants.filter(p => p.id !== msg.payload.id)
+              }));
+              break;
     }
+  }, [channel]);
+
+  // Presence Cleanup on Close
+  useEffect(() => {
+    const handleUnload = () => {
+      if (currentUserRef.current) {
+        channel.postMessage({
+          type: 'LEAVE' as any,
+          payload: { id: currentUserRef.current.id },
+          senderId: currentUserRef.current.id
+        });
+      }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => window.removeEventListener('beforeunload', handleUnload);
   }, [channel]);
 
   useEffect(() => {
@@ -152,6 +192,7 @@ const App: React.FC = () => {
     
     setCurrentUser(newUser);
     currentUserRef.current = newUser;
+    localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(newUser));
     
     setSession(prev => ({
       ...prev,
@@ -163,6 +204,23 @@ const App: React.FC = () => {
     channel.postMessage({ type: 'JOIN', payload: newUser, senderId: newUser.id });
     channel.postMessage({ type: 'SYNC_REQ', payload: null, senderId: newUser.id });
   };
+
+  const onLogout = () => {
+      if (currentUser) {
+        channel.postMessage({
+          type: 'LEAVE' as any,
+          payload: { id: currentUser.id },
+          senderId: currentUser.id
+        });
+      }
+      localStorage.removeItem(STORAGE_KEYS.USER);
+      setCurrentUser(null);
+      setView(AppView.LANDING);
+      setSession(prev => ({
+        ...prev,
+        participants: prev.participants.filter(p => p.id !== currentUser?.id)
+      }));
+    };
 
   const onVote = (vote: string) => {
     if (!currentUser || currentUser.role === 'observer') return;
@@ -306,6 +364,13 @@ const App: React.FC = () => {
               <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-indigo-700 font-bold border-2 border-white shadow-sm">
                 {currentUser?.name.charAt(0).toUpperCase()}
               </div>
+              <button
+                onClick={onLogout}
+                className="text-slate-400 hover:text-red-500 transition-colors"
+                title="Leave Session"
+              >
+                <LogOut size={20} />
+              </button>
             </div>
           </div>
         </div>
