@@ -10,6 +10,7 @@ import {
   collection,
   Timestamp
 } from 'firebase/firestore';
+import type { ActiveTeam, Team } from '../types';
 
 // Конфигурация Firebase (будет загружена из переменных окружения)
 const getFirebaseConfig = () => {
@@ -65,13 +66,16 @@ export interface RoomState {
     title: string;
     description: string;
   };
+  activeTeam: ActiveTeam;
 }
 
 export interface ParticipantData {
   id: string;
   name: string;
-  role: 'voter' | 'admin' | 'observer';
+  role: 'voter' | 'admin';
+  team: Team | null; // admin has no team
   currentVote: string | null;
+  joinedAt: number;
   lastSeen: Timestamp;
 }
 
@@ -99,7 +103,8 @@ export const subscribeToRoomState = (
             id: '1',
             title: 'New Story',
             description: 'Describe requirements here...'
-          }
+          },
+          activeTeam: data.activeTeam || 'All'
         });
       } else {
         // Создаем начальное состояние, если его нет
@@ -109,7 +114,8 @@ export const subscribeToRoomState = (
             id: '1',
             title: 'New Story',
             description: 'Describe requirements here...'
-          }
+          },
+          activeTeam: 'All'
         });
       }
     },
@@ -138,6 +144,15 @@ export const updateTask = async (task: { id: string; title: string; description:
   await updateDoc(roomRef, { currentTask: task });
 };
 
+// Выбор активной команды для голосования
+export const updateActiveTeam = async (activeTeam: ActiveTeam): Promise<void> => {
+  const firestore = initFirebase();
+  if (!firestore) throw new Error('Firebase not initialized');
+
+  const roomRef = doc(firestore, 'rooms', ROOM_ID);
+  await updateDoc(roomRef, { activeTeam });
+};
+
 // Подписка на участников
 export const subscribeToParticipants = (
   onParticipantChange: (participants: Record<string, ParticipantData>) => void,
@@ -163,7 +178,15 @@ export const subscribeToParticipants = (
         if (data.lastSeen && data.lastSeen.toMillis() < thirtySecondsAgo.toMillis()) {
           return; // Пропускаем неактивных
         }
-        participants[docSnapshot.id] = data;
+        const rawRole = (data as any).role as string | undefined;
+        const role: ParticipantData['role'] = rawRole === 'admin' ? 'admin' : 'voter'; // observer -> voter (compat)
+
+        participants[docSnapshot.id] = {
+          ...(data as any),
+          role,
+          team: (data as any).team ?? (role === 'admin' ? null : 'React'),
+          joinedAt: (data as any).joinedAt || 0
+        } as ParticipantData;
       });
 
       onParticipantChange(participants);

@@ -1,5 +1,5 @@
 
-export const DEFAULT_DECK = ['0', '1', '2', '3', '5', '8', '13', '21'];
+export const DEFAULT_DECK = Array.from({ length: 20 }, (_, i) => String(i + 1));
 
 export const STORAGE_KEYS = {
   USER: 'agilevibe_user',

@@ -4,11 +4,16 @@ export enum AppView {
   SESSION = 'SESSION'
 }
 
+export type Team = 'Java' | 'React' | 'QA';
+export type ActiveTeam = Team | 'All';
+
 export interface User {
   id: string;
   name: string;
-  role: 'admin' | 'voter' | 'observer';
+  role: 'admin' | 'voter';
+  team: Team | null; // admin has no team
   currentVote: string | null;
+  joinedAt: number; // millis since epoch; used for stable ordering
 }
 
 export interface Task {

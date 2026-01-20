@@ -17,6 +17,7 @@ import {
   subscribeToParticipants,
   updateRevealedState,
   updateTask,
+  updateActiveTeam,
   upsertParticipant,
   removeParticipant,
   updateParticipantVote,
@@ -42,14 +43,16 @@ import {
 const App: React.FC = () => {
   const [view, setView] = useState<AppView>(AppView.LANDING);
   const [currentUser, setCurrentUser] = useState<User | null>(null);
-  const [selectedRole, setSelectedRole] = useState<'voter' | 'admin' | 'observer'>('voter');
+  const [selectedRole, setSelectedRole] = useState<'voter' | 'admin'>('voter');
+  const [selectedTeam, setSelectedTeam] = useState<'Java' | 'React' | 'QA'>('React');
   const [isOnline, setIsOnline] = useState(false);
   const [aiInsight, setAiInsight] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   // Разделенное состояние для более быстрой реакции UI
-  const [participants, setParticipants] = useState<Record<string, User>>({});
+  const [participants, setParticipants] = useState<Record<string, User>>(() => ({}));
   const [revealed, setRevealed] = useState(false);
+  const [activeTeam, setActiveTeam] = useState<'All' | 'Java' | 'React' | 'QA'>('All');
   const [currentTask, setCurrentTask] = useState<Task>({
     id: '1',
     title: 'New Story',
@@ -87,6 +90,7 @@ const App: React.FC = () => {
       (state) => {
         setRevealed(state.revealed);
         setCurrentTask(state.currentTask);
+        setActiveTeam(state.activeTeam || 'All');
       },
       (error) => {
         console.error('[Firebase] Room state error:', error);
@@ -100,10 +104,13 @@ const App: React.FC = () => {
         // Конвертируем ParticipantData в User формат
         const users: Record<string, User> = {};
         Object.entries(participantsData).forEach(([id, data]) => {
+          const role = (data as any).role === 'admin' ? 'admin' : 'voter'; // observer -> voter (compat)
           users[id] = {
             id: data.id,
             name: data.name,
-            role: data.role,
+            role,
+            team: (data as any).team ?? (role === 'admin' ? null : 'React'),
+            joinedAt: (data as any).joinedAt || 0,
             currentVote: data.currentVote
           };
         });
@@ -142,6 +149,8 @@ const App: React.FC = () => {
           id: user.id,
           name: user.name,
           role: user.role,
+          team: user.team || 'React',
+          joinedAt: user.joinedAt || Date.now(),
           currentVote: user.currentVote
         }).then(() => {
           console.log('[Firebase] User restored and registered:', user.id);
@@ -151,10 +160,13 @@ const App: React.FC = () => {
   }, []);
 
   const onJoin = (name: string) => {
+    const joinedAt = Date.now();
     const newUser: User = {
       id: Math.random().toString(36).substr(2, 9),
       name: name.trim() || 'Guest',
       role: selectedRole,
+      team: selectedRole === 'admin' ? null : selectedTeam,
+      joinedAt,
       currentVote: null
     };
     setCurrentUser(newUser);
@@ -165,6 +177,8 @@ const App: React.FC = () => {
       id: newUser.id,
       name: newUser.name,
       role: newUser.role,
+      team: newUser.team,
+      joinedAt: newUser.joinedAt,
       currentVote: newUser.currentVote
     }).then(() => {
       console.log('[Firebase] User registered:', newUser.id);
@@ -181,7 +195,8 @@ const App: React.FC = () => {
   };
 
   const onVote = (vote: string) => {
-    if (!currentUser || currentUser.role === 'observer' || revealed) return;
+    if (!currentUser || revealed) return;
+    if (activeTeam !== 'All' && currentUser.team !== activeTeam) return;
     const voteValue = currentUser.currentVote === vote ? null : vote;
     const updatedUser = { ...currentUser, currentVote: voteValue };
     setCurrentUser(updatedUser);
@@ -204,7 +219,15 @@ const App: React.FC = () => {
     setAiInsight(null);
     if (currentUser) {
       setCurrentUser(prev => prev ? ({ ...prev, currentVote: null }) : null);
+      updateParticipantVote(currentUser.id, null).catch(console.error);
     }
+    setParticipants((prev: Record<string, User>) => {
+      const next: Record<string, User> = {};
+      Object.entries(prev).forEach(([id, u]) => {
+        next[id] = { ...u, currentVote: null };
+      });
+      return next;
+    });
 
     // Сбрасываем голоса всем активным участникам в Firebase
     const participantIds = Object.keys(participantsRef.current);
@@ -215,6 +238,11 @@ const App: React.FC = () => {
     // Сбрасываем состояние раскрытия
     updateRevealedState(false).catch(console.error);
     console.log('[Firebase] Triggered reset: revealed=false');
+  };
+
+  const handleUpdateActiveTeam = (team: 'All' | 'Java' | 'React' | 'QA') => {
+    setActiveTeam(team);
+    updateActiveTeam(team).catch(console.error);
   };
 
   const onUpdateTask = (e: React.FormEvent<HTMLFormElement>) => {
@@ -232,7 +260,7 @@ const App: React.FC = () => {
 
   const handleAiAnalysis = async () => {
     setIsAnalyzing(true);
-    const votes = Object.values(participants)
+    const votes = (Object.values(participants) as User[])
       .map(p => p.currentVote)
       .filter((v): v is string => v !== null);
 
@@ -261,10 +289,14 @@ const App: React.FC = () => {
           </div>
 
           <div className="mt-8 space-y-6">
-            <div className="grid grid-cols-3 gap-2 p-1 bg-slate-100 rounded-xl">
+            <div className="grid grid-cols-2 gap-2 p-1 bg-slate-100 rounded-xl">
                <button onClick={() => setSelectedRole('voter')} className={`flex flex-col items-center gap-1 py-3 rounded-lg transition-all ${selectedRole === 'voter' ? 'bg-white shadow-sm text-indigo-600 font-bold' : 'text-slate-500'}`}><UserCheck size={18} />Voter</button>
                <button onClick={() => setSelectedRole('admin')} className={`flex flex-col items-center gap-1 py-3 rounded-lg transition-all ${selectedRole === 'admin' ? 'bg-white shadow-sm text-indigo-600 font-bold' : 'text-slate-500'}`}><ShieldCheck size={18} />Admin</button>
-               <button onClick={() => setSelectedRole('observer')} className={`flex flex-col items-center gap-1 py-3 rounded-lg transition-all ${selectedRole === 'observer' ? 'bg-white shadow-sm text-indigo-600 font-bold' : 'text-slate-500'}`}><Eye size={18} />Observer</button>
+            </div>
+            <div className="grid grid-cols-3 gap-2 p-1 bg-slate-100 rounded-xl">
+              <button onClick={() => setSelectedTeam('Java')} className={`py-3 rounded-lg transition-all font-bold ${selectedTeam === 'Java' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>Java</button>
+              <button onClick={() => setSelectedTeam('React')} className={`py-3 rounded-lg transition-all font-bold ${selectedTeam === 'React' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>React</button>
+              <button onClick={() => setSelectedTeam('QA')} className={`py-3 rounded-lg transition-all font-bold ${selectedTeam === 'QA' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500'}`}>QA</button>
             </div>
 
             <form onSubmit={(e) => { e.preventDefault(); onJoin(new FormData(e.currentTarget).get('name') as string); }} className="space-y-6">
@@ -294,7 +326,7 @@ const App: React.FC = () => {
           <div className="flex items-center gap-4">
             <div className="text-right">
               <p className="text-sm font-bold text-slate-900">{currentUser?.name}</p>
-              <p className="text-[10px] font-bold text-indigo-500 uppercase">{currentUser?.role}</p>
+              <p className="text-[10px] font-bold text-indigo-500 uppercase">{currentUser?.role} • {currentUser?.team}</p>
             </div>
             <button onClick={onLogout} className="text-slate-400 hover:text-red-500 p-2"><LogOut size={20}/></button>
           </div>
@@ -321,6 +353,26 @@ const App: React.FC = () => {
                   </form>
                 </div>
               )}
+              {currentUser?.role === 'admin' && (
+                <div className="border-t pt-6">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <p className="text-sm font-bold text-slate-900">Active team for voting</p>
+                      <p className="text-xs text-slate-500">Only selected team can vote (others are locked)</p>
+                    </div>
+                    <select
+                      value={activeTeam}
+                      onChange={(e) => handleUpdateActiveTeam(e.target.value as any)}
+                      className="px-3 py-2 border rounded-xl text-sm font-bold"
+                    >
+                      <option value="All">All</option>
+                      <option value="Java">Java</option>
+                      <option value="React">React</option>
+                      <option value="QA">QA</option>
+                    </select>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-4">
@@ -332,10 +384,13 @@ const App: React.FC = () => {
                     value={val}
                     selected={currentUser?.currentVote === val}
                     onSelect={onVote}
-                    disabled={revealed || currentUser?.role === 'observer'}
+                    disabled={revealed || (activeTeam !== 'All' && currentUser?.team !== activeTeam)}
                   />
                 ))}
               </div>
+              {activeTeam !== 'All' && currentUser?.team !== activeTeam && (
+                <p className="text-xs font-bold text-amber-600">Voting is locked for your team right now (active: {activeTeam}).</p>
+              )}
             </div>
 
             {revealed && (
